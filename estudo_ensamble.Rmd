@@ -1,0 +1,399 @@
+---
+title: "Untitled"
+author: "Fellipe Gomes"
+date: "7/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+# Time Series Modeling and Machine Learning
+library(modeltime.ensemble)
+library(boostime)
+library(modeltime)
+library(tidymodels)
+library(timetk)
+library(tidyverse)
+```
+
+# Data Description
+
+
+"In this competition you are predicting the values of air pollution measurements over time, based on basic weather information (temperature and humidity) and the input values of 5 sensors.
+
+The three target values to you to predict are: `target_carbon_monoxide`, `target_benzene`, and `target_nitrogen_oxides`"
+
+```{r}
+train <- readr::read_csv('train.csv')
+test <-  readr::read_csv('test.csv')
+sub <-   readr::read_csv('sample_submission.csv')
+```
+
+
+```{r}
+prepare_data <- function(x, to_remove=NULL){
+    
+    x = x %>% 
+      select(-one_of(to_remove)) %>% 
+      mutate(date_time = lubridate::ymd_hms(date_time))%>%
+      rename(date = date_time)
+    
+    if(!is.null(to_remove)){
+        colnames(x)[ncol(x)] = "target"        
+    }
+
+    x
+}
+
+test = prepare_data(test)
+train1 = prepare_data(train, c('target_benzene', 'target_nitrogen_oxides'))
+train2 = prepare_data(train, c('target_carbon_monoxide', 'target_nitrogen_oxides'))
+train3 = prepare_data(train, c('target_carbon_monoxide', 'target_benzene'))
+```
+
+
+
+```{r}
+train1 %>%
+  select(date, target) %>% 
+    plot_seasonal_diagnostics(
+        date, target,
+        .feature_set = c("hour", "month.lbl", "quarter", "year"),
+        .interactive = FALSE
+    )
+```
+
+```{r}
+splits <- train1 %>% time_series_split(assess = "3 month", cumulative = TRUE)
+
+recipe_spec <- recipe(target ~ ., train1) %>%
+  step_timeseries_signature(date) %>%
+  step_rm(matches("(.iso$)|(.xts$)|(minute)|(second)|(date_month)|(date_wday.lbl)"))
+
+recipe_spec %>% prep() %>% juice()
+```
+
+```{r}
+model_spec_glmnet <- linear_reg(penalty = 0.01, mixture = 0.5) %>%
+    set_engine("glmnet")
+
+wflw_fit_glmnet <- workflow() %>%
+    add_model(model_spec_glmnet) %>%
+    add_recipe(recipe_spec %>% step_rm(date)) %>%
+    fit(training(splits))
+```
+
+```{r}
+model_spec_xgboost <- boost_tree() %>%
+    set_engine("xgboost")
+
+set.seed(123)
+wflw_fit_xgboost <- workflow() %>%
+    add_model(model_spec_xgboost) %>%
+    add_recipe(recipe_spec %>% step_rm(date)) %>%
+    fit(training(splits))
+```
+
+```{r}
+model_spec_nnetar <- nnetar_reg(
+        seasonal_period = 52,
+        non_seasonal_ar = 4,
+        seasonal_ar     = 1
+    ) %>%
+    set_engine("nnetar")
+
+set.seed(123)
+wflw_fit_nnetar <- workflow() %>%
+    add_model(model_spec_nnetar) %>%
+    add_recipe(recipe_spec) %>%
+    fit(training(splits))
+```
+
+```{r}
+model_spec_prophet <- prophet_reg(
+      seasonality_yearly = FALSE
+    ) %>%
+    set_engine("prophet") 
+
+wflw_fit_prophet <- workflow() %>%
+    add_model(model_spec_prophet) %>%
+    add_recipe(recipe_spec) %>%
+    fit(training(splits))
+```
+
+```{r}
+submodels_tbl <- modeltime_table(
+    wflw_fit_glmnet,
+    wflw_fit_xgboost,
+    wflw_fit_nnetar,
+    wflw_fit_prophet
+)
+```
+
+```{r}
+submodels_tbl %>% 
+    modeltime_accuracy(testing(splits)) %>%
+    table_modeltime_accuracy(.interactive = FALSE)
+```
+
+```{r}
+submodels_tbl %>%
+    modeltime_forecast(
+        new_data    = testing(splits),
+        actual_data = train1
+    ) %>%
+    plot_modeltime_forecast(.interactive = FALSE, .conf_interval_show = FALSE)
+```
+
+```{r}
+# Simple Average Ensemble
+ensemble_fit_avg <- submodels_tbl %>%
+    ensemble_average(type = "mean")
+
+# Simple Median Ensemble
+ensemble_fit_med <- submodels_tbl %>%
+    ensemble_average("median")
+
+# Higher Loading on Better Models (Test RMSE)
+ensemble_fit_wt <- submodels_tbl %>%
+    ensemble_weighted(loadings = c(2, 0.5, 4, 0.5))
+```
+
+```{r}
+ensemble_models_tbl <- modeltime_table(
+    ensemble_fit_avg,
+    ensemble_fit_med,
+    ensemble_fit_wt
+)
+
+ensemble_models_tbl %>%
+    modeltime_accuracy(testing(splits)) %>%
+    table_modeltime_accuracy(.interactive = FALSE)
+```
+
+```{r}
+y_pred1 <- ensemble_models_tbl %>%
+  filter(.model_id==3) %>% 
+    modeltime_forecast(
+        new_data    = test,
+        actual_data = train1
+    ) %>% 
+  filter(.key=="prediction") %>% 
+  pull(.value)
+
+```
+
+
+# 2
+
+```{r}
+splits <- train2 %>% time_series_split(assess = "3 month", cumulative = TRUE)
+
+recipe_spec <- recipe(target ~ ., train2) %>%
+  step_timeseries_signature(date) %>%
+  step_rm(matches("(.iso$)|(.xts$)|(minute)|(second)|(date_month)|(date_wday.lbl)"))
+```
+
+```{r}
+wflw_fit_glmnet <- workflow() %>%
+    add_model(model_spec_glmnet) %>%
+    add_recipe(recipe_spec %>% step_rm(date)) %>%
+    fit(training(splits))
+```
+
+```{r}
+set.seed(123)
+wflw_fit_xgboost <- workflow() %>%
+    add_model(model_spec_xgboost) %>%
+    add_recipe(recipe_spec %>% step_rm(date)) %>%
+    fit(training(splits))
+```
+
+```{r}
+set.seed(123)
+wflw_fit_nnetar <- workflow() %>%
+    add_model(model_spec_nnetar) %>%
+    add_recipe(recipe_spec) %>%
+    fit(training(splits))
+```
+
+```{r}
+wflw_fit_prophet <- workflow() %>%
+    add_model(model_spec_prophet) %>%
+    add_recipe(recipe_spec) %>%
+    fit(training(splits))
+```
+
+```{r}
+submodels_tbl <- modeltime_table(
+    wflw_fit_glmnet,
+    wflw_fit_xgboost,
+    wflw_fit_nnetar,
+    wflw_fit_prophet
+)
+```
+
+```{r}
+submodels_tbl %>% 
+    modeltime_accuracy(testing(splits)) %>%
+    table_modeltime_accuracy(.interactive = FALSE)
+```
+
+```{r}
+# Simple Average Ensemble
+ensemble_fit_avg <- submodels_tbl %>%
+    ensemble_average(type = "mean")
+
+# Simple Median Ensemble
+ensemble_fit_med <- submodels_tbl %>%
+    ensemble_average("median")
+
+# Higher Loading on Better Models (Test RMSE)
+ensemble_fit_wt <- submodels_tbl %>%
+    ensemble_weighted(loadings = c(0.5, 2, 3, 0.5))
+```
+
+```{r}
+ensemble_models_tbl <- modeltime_table(
+    ensemble_fit_avg,
+    ensemble_fit_med,
+    ensemble_fit_wt
+)
+
+ensemble_models_tbl %>%
+    modeltime_accuracy(testing(splits)) %>%
+    table_modeltime_accuracy(.interactive = FALSE)
+```
+
+```{r}
+y_pred2 <- ensemble_models_tbl %>%
+  filter(.model_id==3) %>% 
+    modeltime_forecast(
+        new_data    = test,
+        actual_data = train2
+    ) %>% 
+  filter(.key=="prediction") %>% 
+  pull(.value)
+```
+
+# 3
+
+```{r}
+splits <- train3 %>% time_series_split(assess = "1 month", cumulative = TRUE)
+
+recipe_spec <- recipe(target ~ ., train3) %>%
+  step_timeseries_signature(date) %>%
+  step_rm(matches("(.iso$)|(.xts$)|(minute)|(second)|(date_month)|(date_wday.lbl)"))
+```
+
+```{r}
+wflw_fit_glmnet <- workflow() %>%
+    add_model(model_spec_glmnet) %>%
+    add_recipe(recipe_spec %>% step_rm(date)) %>%
+    fit(training(splits))
+```
+
+```{r}
+set.seed(123)
+wflw_fit_xgboost <- workflow() %>%
+    add_model(model_spec_xgboost) %>%
+    add_recipe(recipe_spec %>% step_rm(date)) %>%
+    fit(training(splits))
+```
+
+```{r}
+set.seed(123)
+wflw_fit_nnetar <- workflow() %>%
+    add_model(model_spec_nnetar) %>%
+    add_recipe(recipe_spec) %>%
+    fit(training(splits))
+```
+
+```{r}
+wflw_fit_prophet <- workflow() %>%
+    add_model(model_spec_prophet) %>%
+    add_recipe(recipe_spec) %>%
+    fit(training(splits))
+```
+
+```{r}
+submodels_tbl <- modeltime_table(
+    wflw_fit_glmnet,
+    wflw_fit_xgboost,
+    wflw_fit_nnetar,
+    wflw_fit_prophet
+)
+```
+
+```{r}
+submodels_tbl %>% 
+    modeltime_accuracy(testing(splits)) %>%
+    table_modeltime_accuracy(.interactive = FALSE)
+```
+
+```{r}
+# Simple Average Ensemble
+ensemble_fit_avg <- submodels_tbl %>%
+    ensemble_average(type = "mean")
+
+# Simple Median Ensemble
+ensemble_fit_med <- submodels_tbl %>%
+    ensemble_average("median")
+
+# Higher Loading on Better Models (Test RMSE)
+ensemble_fit_wt <- submodels_tbl %>%
+    ensemble_weighted(loadings = c(2, 2, 1, 1))
+```
+
+```{r}
+ensemble_models_tbl <- modeltime_table(
+    ensemble_fit_avg,
+    ensemble_fit_med,
+    ensemble_fit_wt
+)
+
+ensemble_models_tbl %>%
+    modeltime_accuracy(testing(splits)) %>%
+    table_modeltime_accuracy(.interactive = FALSE)
+```
+
+```{r}
+ensemble_models_tbl %>%
+    modeltime_forecast(
+        new_data    = test,
+        actual_data = train3
+    ) %>%
+    plot_modeltime_forecast(.interactive = FALSE)
+```
+
+
+```{r}
+y_pred3 <- ensemble_models_tbl %>%
+  filter(.model_id==2) %>% 
+    modeltime_forecast(
+        new_data    = test,
+        actual_data = train3
+    ) %>% 
+  filter(.key=="prediction") %>% 
+  pull(.value)
+```
+
+```{r}
+sub <- bind_cols(select(sub, date_time),
+          tibble(target_carbon_monoxide = y_pred1), 
+          tibble(target_benzene = y_pred2),
+          tibble(target_nitrogen_oxides = y_pred3))
+sub
+```
+
+```{r}
+sub %>% 
+    mutate(date_time = lubridate::ymd_hms(date_time) %>%
+          as.character()) %>%
+    write_csv("sub_ens.csv")
+```
+
+
+

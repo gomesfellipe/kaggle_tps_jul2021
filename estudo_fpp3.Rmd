@@ -1,0 +1,235 @@
+---
+title: "Untitled"
+author: "Fellipe Gomes"
+date: "7/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(fable.prophet)
+```
+
+# Data Description
+
+
+"In this competition you are predicting the values of air pollution measurements over time, based on basic weather information (temperature and humidity) and the input values of 5 sensors.
+
+The three target values to you to predict are: `target_carbon_monoxide`, `target_benzene`, and `target_nitrogen_oxides`"
+
+```{r}
+train <- readr::read_csv('train.csv')
+test <-  readr::read_csv('test.csv')
+sub <-   readr::read_csv('sample_submission.csv')
+```
+
+
+```{r}
+prepare_data <- function(x, to_remove=NULL){
+  
+  x = x %>% 
+    select(-one_of(to_remove)) %>% 
+    mutate(date_time = lubridate::ymd_hms(date_time))%>%
+    rename(date = date_time)
+  
+  if(!is.null(to_remove)){
+    colnames(x)[ncol(x)] = "target"        
+  }
+  x %>% as_tsibble(index = date)
+}
+
+test = prepare_data(test)
+train1 = prepare_data(train, c('target_benzene', 'target_nitrogen_oxides'))
+train2 = prepare_data(train, c('target_carbon_monoxide', 'target_nitrogen_oxides'))
+train3 = prepare_data(train, c('target_carbon_monoxide', 'target_benzene'))
+```
+
+
+```{r}
+library(fpp3)
+library(patchwork)
+train <- train %>% as_tsibble(index = date_time)
+
+#lab <- labs(x="")
+#train %>% {
+#  (autoplot(., deg_C)+lab+
+#     autoplot(., relative_humidity)+lab+
+#     autoplot(., absolute_humidity)+lab)/
+#    (autoplot(., sensor_1)+lab+
+#       autoplot(., sensor_2)+lab+
+#       autoplot(., sensor_3)+lab)/
+#    (autoplot(., sensor_4)+lab+
+#       autoplot(., sensor_5)+lab)
+#}
+```
+
+```{r}
+#train %>% {
+#  (autoplot(., target_carbon_monoxide)+lab)/
+#  (autoplot(., target_benzene)+lab)/
+#  (autoplot(., target_nitrogen_oxides)+lab)
+#}
+```
+
+
+```{r}
+#g1 <- gg_season(train, target_carbon_monoxide, period = "week", alpha=0.7)+
+#  theme(legend.position = "none")  +
+#  labs(x="")
+#
+#g2 <- gg_season(train, target_benzene, period = "week", alpha=0.7)+
+#  theme(legend.position = "none")  +
+#  labs(x="")
+#
+#g3 <- gg_season(train, target_nitrogen_oxides, period = "week", alpha=0.7)+
+#  theme(legend.position = "none")  +
+#  labs(x="")
+#
+#g1 / g2 / g3
+```
+
+```{r}
+# train %>% 
+#   select(-date_time) %>% 
+#   rename_all(~str_replace_all(.x, "_", "\n")) %>% 
+#   GGally::ggpairs()
+```
+
+```{r}
+#g1 <- ACF(train, target_carbon_monoxide) %>% autoplot()
+#g2 <- ACF(train, target_benzene) %>% autoplot()
+#g3 <- ACF(train, target_nitrogen_oxides) %>% autoplot()
+#
+#g1 / g2 / g3
+```
+
+```{r}
+x_form <- paste0(colnames(train1) %>% .[!.%in%c('date', 'target')], collapse = "+")
+form_lm <- as.formula(paste0("target~", x_form, "+trend()+season()"))
+form_prophet <- as.formula(paste0("target~", x_form))
+```
+
+```{r}
+y_original <- train1$target
+lam = BoxCox.lambda(y_original, method = "loglik")
+train1$target = BoxCox(y_original, lam)
+
+fit1 <- train1 %>% model(tslm = TSLM(form_lm),
+                         prophet = prophet(form_prophet))
+report(fit1$tslm[[1]])
+```
+
+```{r}
+# fit1$prophet[[1]] %>%
+#   components() %>%
+#   autoplot()
+```
+
+
+```{r}
+#augment(fit1) %>%
+#  ggplot(aes(x = date)) +
+#  geom_line(aes(y = target, colour = "Data")) +
+#  geom_line(aes(y = .fitted, colour = "Fitted"), alpha=0.5) +
+#  labs(y = NULL,
+#    title = "Percent change in US consumption expenditure"
+#  ) +
+#  scale_colour_manual(values=c(Data="black",Fitted="#D55E00")) +
+#  guides(colour = guide_legend(title = NULL))
+```
+
+```{r}
+#augment(fit1) %>%
+#  ggplot(aes(x = target, y = .fitted)) +
+#  geom_point() +
+#  labs(
+#    y = "Fitted (predicted values)",
+#    x = "Data (actual values)",
+#    title = "Percent change in US consumption expenditure"
+#  ) +
+#  geom_abline(intercept = 0, slope = 1)
+```
+
+```{r}
+fc <- forecast(fit1, new_data = test)
+
+train1 %>%
+  autoplot(target) +
+  autolayer(fc, alpha=0.5) +
+  labs(title = "US consumption", y = "% change")
+
+y_tslm <- fc %>% filter(.model=="tslm") %>% pull(.mean) %>% InvBoxCox(lam)
+y_prophet <- fc %>% filter(.model=="prophet") %>% pull(.mean) %>% InvBoxCox(lam)
+
+y_pred1 <- (y_tslm+y_prophet)/2
+```
+
+# 2
+
+```{r}
+y_original <- train2$target
+lam = BoxCox.lambda(y_original, method = "loglik")
+train2$target = BoxCox(y_original, lam)
+
+fit2 <- train2 %>% model(tslm = TSLM(form_lm),
+                         prophet = prophet(form_prophet))
+report(fit2$tslm[[1]])
+```
+
+```{r}
+fc <- forecast(fit2, new_data = test)
+
+train2 %>%
+  autoplot(target) +
+  autolayer(fc, alpha=0.5) +
+  labs(title = "US consumption", y = "% change")
+
+y_tslm <- fc %>% filter(.model=="tslm") %>% pull(.mean) %>% InvBoxCox(lam)
+y_prophet <- fc %>% filter(.model=="prophet") %>% pull(.mean) %>% InvBoxCox(lam)
+
+y_pred2 <- (y_tslm+y_prophet)/2
+```
+
+# 3
+
+```{r}
+y_original <- train3$target
+lam = BoxCox.lambda(y_original, method = "loglik")
+train3$target = BoxCox(y_original, lam)
+
+fit3 <- train3 %>% model(tslm = TSLM(form_lm),
+                         prophet = prophet(form_prophet))
+report(fit3$tslm[[1]])
+```
+
+```{r}
+fc <- forecast(fit3, new_data = test)
+
+train3 %>%
+  autoplot(target) +
+  autolayer(fc, alpha=0.5) +
+  labs(title = "US consumption", y = "% change")
+
+y_tslm <- fc %>% filter(.model=="tslm") %>% pull(.mean) %>% InvBoxCox(lam)
+y_prophet <- fc %>% filter(.model=="prophet") %>% pull(.mean) %>% InvBoxCox(lam)
+
+y_pred3 <- (y_tslm+y_prophet)/2
+```
+
+```{r}
+sub <- bind_cols(select(sub, date_time),
+          tibble(target_carbon_monoxide = y_pred1), 
+          tibble(target_benzene = y_pred2),
+          tibble(target_nitrogen_oxides = y_pred3))
+sub
+```
+
+```{r}
+sub %>% 
+    mutate(date_time = lubridate::ymd_hms(date_time) %>%
+          as.character()) %>%
+    write_csv("sub.csv")
+```
+
